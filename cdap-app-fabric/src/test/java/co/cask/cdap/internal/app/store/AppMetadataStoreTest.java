@@ -35,7 +35,6 @@ import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
 import com.google.inject.Injector;
 import org.apache.tephra.TransactionAware;
 import org.apache.tephra.TransactionExecutor;
@@ -56,7 +55,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nullable;
 
 /**
@@ -151,16 +149,15 @@ public class AppMetadataStoreTest {
 
   @Test
   public void testSmallerSourceIdRecords() throws Exception {
-    final AppMetadataStore metadataStoreDataset = getMetadataStore("testSmallerSourceIdRecords");
+    AppMetadataStore metadataStoreDataset = getMetadataStore("testSmallerSourceIdRecords");
     TransactionExecutor txnl = getTxExecutor(metadataStoreDataset);
     // STARTING status is persisted with the largest sourceId
-    assertPersistedStatus(metadataStoreDataset, txnl, 1000L, 100L, 10L, ProgramRunStatus.STARTING);
+    assertPersistedStatus(metadataStoreDataset, txnl, 100L, 10L, 1L, ProgramRunStatus.STARTING);
+    assertPersistedStatus(metadataStoreDataset, txnl, 100L, 1L, 10L, ProgramRunStatus.STARTING);
     // RUNNING status is persisted with the largest sourceId
-    assertPersistedStatus(metadataStoreDataset, txnl, 10L, 1000L, 10L, ProgramRunStatus.RUNNING);
+    assertPersistedStatus(metadataStoreDataset, txnl, 1L, 100L, 10L, ProgramRunStatus.RUNNING);
     // KILLED status is persisted with the largest sourceId
-    assertPersistedStatus(metadataStoreDataset, txnl, 10L, 100L, 1000L, ProgramRunStatus.KILLED);
-    // STARTING status is persisted since no following sourceId is larger
-    assertPersistedStatus(metadataStoreDataset, txnl, 10L, 10L, 10L, ProgramRunStatus.STARTING);
+    assertPersistedStatus(metadataStoreDataset, txnl, 1L, 10L, 100L, ProgramRunStatus.KILLED);
   }
 
   @Test
@@ -191,13 +188,13 @@ public class AppMetadataStoreTest {
 
   private void assertPersistedStatus(final AppMetadataStore metadataStoreDataset, TransactionExecutor txnl,
                                      final long startSourceId, final long runningSourceId,
-                                     final long killedSourceId, ProgramRunStatus expectedRunStatus) throws Exception {
+                                     final long killedSourceId, final ProgramRunStatus expectedRunStatus)
+    throws Exception {
     // Add some run records
     ApplicationId application = NamespaceId.DEFAULT.app("app");
     final ProgramId program = application.program(ProgramType.WORKFLOW, "program");
     // use sourceId's to ensure runId is unique for each run
-    final RunId runId = RunIds.generate(10000 + startSourceId + runningSourceId + killedSourceId);
-    final AtomicReference<RunRecordMeta> resultRecord = new AtomicReference<>();
+    final RunId runId = RunIds.generate(startSourceId * 3 + runningSourceId * 5 + killedSourceId * 7);
     txnl.execute(new TransactionExecutor.Subroutine() {
       @Override
       public void apply() throws Exception {
@@ -210,113 +207,71 @@ public class AppMetadataStoreTest {
         metadataStoreDataset.recordProgramStop(program, runId.getId(), RunIds.getTime(runId, TimeUnit.SECONDS),
                                                ProgramRunStatus.KILLED,
                                                null, AppFabricTestHelper.createSourceId(killedSourceId));
-        resultRecord.set(metadataStoreDataset.getRun(program, runId.getId()));
+        Assert.assertEquals(expectedRunStatus, metadataStoreDataset.getRun(program, runId.getId()).getStatus());
       }
     });
-    Assert.assertEquals(expectedRunStatus, resultRecord.get().getStatus());
   }
 
   private void assertPersistedStatus(final AppMetadataStore metadataStoreDataset, TransactionExecutor txnl,
-                                     @Nullable ProgramRunStatus expectedRunStatus,
-                                     List<ProgramRunStatus> recordStatuses)
-    throws Exception {
+                                     @Nullable final ProgramRunStatus expectedRunStatus,
+                                     final List<ProgramRunStatus> recordStatuses) throws Exception {
     // Add some run records
     ApplicationId application = NamespaceId.DEFAULT.app("app");
     final ProgramId program = application.program(ProgramType.WORKFLOW, "program");
     final RunId runId = RunIds.generate(10000);
     final AtomicLong sourceId = new AtomicLong();
-    final Map<ProgramRunStatus, Runnable> statusRecordMap =
-      getStatusRecordMap(metadataStoreDataset, program, runId, sourceId);
-    // Get the record status runnable for each program run status
-    final List<Runnable> recordRunnables = Lists.transform(recordStatuses, new Function<ProgramRunStatus, Runnable>() {
-      @Nullable
-      @Override
-      public Runnable apply(ProgramRunStatus runStatus) {
-        return statusRecordMap.get(runStatus);
-      }
-    });
     // Execute all record status runnable and assert the result
-    final AtomicReference<RunRecordMeta> resultRecord = new AtomicReference<>();
     txnl.execute(new TransactionExecutor.Subroutine() {
       @Override
       public void apply() throws Exception {
-        for (Runnable runnable : recordRunnables) {
-          if (runnable != null) {
-            runnable.run();
-          }
+        for (ProgramRunStatus runStatus : recordStatuses) {
+          recordStatus(runStatus, metadataStoreDataset, program, runId, sourceId);
         }
-        resultRecord.set(metadataStoreDataset.getRun(program, runId.getId()));
+        RunRecordMeta runRecordMeta = metadataStoreDataset.getRun(program, runId.getId());
+        // If expectedRunStatus is null, no run record is expected to be persisted
+        if (expectedRunStatus == null) {
+          Assert.assertNull(runRecordMeta);
+        } else {
+          Assert.assertNotNull(runRecordMeta);
+          Assert.assertEquals(expectedRunStatus, runRecordMeta.getStatus());
+        }
       }
     });
-    // If expectedRunStatus is null, no run record is expected to be persisted
-    if (expectedRunStatus == null) {
-      Assert.assertNull(resultRecord.get());
-      return;
-    }
-    Assert.assertNotNull(resultRecord.get());
-    // Only one record with the expected status should exist
-    Assert.assertEquals(expectedRunStatus, resultRecord.get().getStatus());
   }
 
-  private Map<ProgramRunStatus, Runnable> getStatusRecordMap(final AppMetadataStore metadataStoreDataset,
-                                                             final ProgramId program, final RunId runId,
-                                                             final AtomicLong sourceId) {
-    ImmutableMap.Builder<ProgramRunStatus, Runnable> statusRecordMap = new ImmutableMap.Builder<>();
-    statusRecordMap.put(ProgramRunStatus.STARTING, new Runnable() {
-      @Override
-      public void run() {
+  private void recordStatus(final ProgramRunStatus runStatus, final AppMetadataStore metadataStoreDataset,
+                            final ProgramId program, final RunId runId, final AtomicLong sourceId) {
+    switch (runStatus) {
+      case STARTING:
         metadataStoreDataset.recordProgramStart(program, runId.getId(), RunIds.getTime(runId, TimeUnit.SECONDS),
                                                 null, ImmutableMap.<String, String>of(),
                                                 ImmutableMap.<String, String>of(),
                                                 AppFabricTestHelper.createSourceId(sourceId.incrementAndGet()));
-      }
-    });
-    statusRecordMap.put(ProgramRunStatus.RUNNING, new Runnable() {
-      @Override
-      public void run() {
+        break;
+      case RUNNING:
         metadataStoreDataset.recordProgramRunning(program, runId.getId(), RunIds.getTime(runId, TimeUnit.SECONDS),
-                                                  null, AppFabricTestHelper.createSourceId(sourceId.incrementAndGet()));
-      }
-    });
-    statusRecordMap.put(ProgramRunStatus.SUSPENDED, new Runnable() {
-      @Override
-      public void run() {
+                                                  null,
+                                                  AppFabricTestHelper.createSourceId(sourceId.incrementAndGet()));
+        break;
+      case SUSPENDED:
         metadataStoreDataset.recordProgramSuspend(program, runId.getId(),
                                                   AppFabricTestHelper.createSourceId(sourceId.incrementAndGet()));
-      }
-    });
-    statusRecordMap.put(ProgramRunStatus.RESUMING, new Runnable() {
-      @Override
-      public void run() {
+        break;
+      case RESUMING:
         metadataStoreDataset.recordProgramResumed(program, runId.getId(),
                                                   AppFabricTestHelper.createSourceId(sourceId.incrementAndGet()));
-      }
-    });
-    statusRecordMap.put(ProgramRunStatus.COMPLETED, new Runnable() {
-      @Override
-      public void run() {
+        break;
+      case COMPLETED:
+      case FAILED:
+      case KILLED:
         metadataStoreDataset.recordProgramStop(program, runId.getId(), RunIds.getTime(runId, TimeUnit.SECONDS),
-                                               ProgramRunStatus.COMPLETED, null,
+                                               runStatus, null,
                                                AppFabricTestHelper.createSourceId(sourceId.incrementAndGet()));
-      }
-    });
-    statusRecordMap.put(ProgramRunStatus.FAILED, new Runnable() {
-      @Override
-      public void run() {
-        metadataStoreDataset.recordProgramStop(program, runId.getId(), RunIds.getTime(runId, TimeUnit.SECONDS),
-                                               ProgramRunStatus.FAILED, null,
-                                               AppFabricTestHelper.createSourceId(sourceId.incrementAndGet()));
-      }
-    });
-    statusRecordMap.put(ProgramRunStatus.KILLED, new Runnable() {
-      @Override
-      public void run() {
-        metadataStoreDataset.recordProgramStop(program, runId.getId(), RunIds.getTime(runId, TimeUnit.SECONDS),
-                                               ProgramRunStatus.KILLED, null,
-                                               AppFabricTestHelper.createSourceId(sourceId.incrementAndGet()));
-      }
-    });
-    return statusRecordMap.build();
+        break;
+      default:
+        // this should never happen
+        throw new IllegalArgumentException(String.format("Status %s is not allowed", runStatus));
+    }
   }
 
   @Test
