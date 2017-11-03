@@ -59,6 +59,7 @@ import co.cask.cdap.security.spi.authentication.AuthenticationContext;
 import co.cask.cdap.security.spi.authorization.AuthorizationEnforcer;
 import co.cask.cdap.security.spi.authorization.UnauthorizedException;
 import co.cask.cdap.store.NamespaceStore;
+import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.AbstractIdleService;
 import com.google.common.util.concurrent.Futures;
@@ -76,10 +77,14 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
 /**
@@ -362,31 +367,73 @@ public class ProgramLifecycleService extends AbstractIdleService {
   public List<ListenableFuture<ProgramController>> issueStop(ProgramId programId, @Nullable String runId)
     throws Exception {
     authorizationEnforcer.enforce(programId, authenticationContext.getPrincipal(), Action.EXECUTE);
-    List<ProgramRuntimeService.RuntimeInfo> runtimeInfos = findRuntimeInfo(programId, runId);
-    if (runtimeInfos.isEmpty()) {
+
+    Supplier<Map<ProgramRunId, RunRecordMeta>> activeRunsSupplier = () -> {
+      if (runId == null) {
+        return store.getActiveRuns(programId);
+      } else {
+        RunRecordMeta runRecord = store.getRun(programId, runId);
+        return runRecord == null
+          ? Collections.emptyMap()
+          : Collections.singletonMap(programId.run(runId), runRecord);
+      }
+    };
+
+    Map<ProgramRunId, RunRecordMeta> activeRuns = activeRunsSupplier.get();
+
+    if (activeRuns.isEmpty()) {
       if (!store.applicationExists(programId.getParent())) {
         throw new ApplicationNotFoundException(programId.getParent());
       } else if (!store.programExists(programId)) {
         throw new ProgramNotFoundException(programId);
-      } else if (runId != null) {
-        ProgramRunId programRunId = programId.run(runId);
-        // Check if the program is running and is started by the Workflow
-        RunRecordMeta runRecord = store.getRun(programId, runId);
-        if (runRecord != null && runRecord.getProperties().containsKey("workflowrunid")
-          && runRecord.getStatus().equals(ProgramRunStatus.RUNNING)) {
-          String workflowRunId = runRecord.getProperties().get("workflowrunid");
-          throw new BadRequestException(String.format("Cannot stop the program '%s' started by the Workflow " +
-                                                        "run '%s'. Please stop the Workflow.", programRunId,
-                                                      workflowRunId));
-        }
-        throw new NotFoundException(programRunId);
       }
       throw new BadRequestException(String.format("Program '%s' is not running.", programId));
     }
-    List<ListenableFuture<ProgramController>> futures = new ArrayList<>();
-    for (ProgramRuntimeService.RuntimeInfo runtimeInfo : runtimeInfos) {
-      futures.add(runtimeInfo.getController().stop());
+
+    // Check if the program is running and is started by Workflow
+    if (runId != null) {
+      ProgramRunId programRunId = programId.run(runId);
+      RunRecordMeta runRecord = activeRuns.get(programRunId);
+      if (runRecord != null && runRecord.getProperties().containsKey("workflowrunid")
+        && runRecord.getStatus().equals(ProgramRunStatus.RUNNING)) {
+        String workflowRunId = runRecord.getProperties().get("workflowrunid");
+        throw new BadRequestException(String.format("Cannot stop the program '%s' started by the Workflow " +
+                                                      "run '%s'. Please stop the Workflow.", programRunId,
+                                                    workflowRunId));
+      }
     }
+
+    // Stop all running programs based on the run record
+    // It's possible that some of them are not yet available from the runtimeService due to timing
+    // differences between the run record was created vs being added to runtimeService
+    // So we retry in a loop for up to 3 seconds max to cater for those cases
+    List<ListenableFuture<ProgramController>> futures = new ArrayList<>();
+    Stopwatch stopwatch = new Stopwatch().start();
+    Map<ProgramRunId, RunRecordMeta> runsToBeStopped = new HashMap<>(activeRuns);
+
+    while (!runsToBeStopped.isEmpty() && stopwatch.elapsedTime(TimeUnit.SECONDS) < 3L) {
+      Map<RunId, RuntimeInfo> runtimeInfos = runtimeService.list(programId);
+
+      // Stop the run if it is available from the runtimeService
+      Iterator<Map.Entry<ProgramRunId, RunRecordMeta>> iterator = runsToBeStopped.entrySet().iterator();
+      while (iterator.hasNext()) {
+        Map.Entry<ProgramRunId, RunRecordMeta> entry = iterator.next();
+        RuntimeInfo runtimeInfo = runtimeInfos.get(RunIds.fromString(entry.getKey().getRun()));
+        if (runtimeInfo != null) {
+          futures.add(runtimeInfo.getController().stop());
+          iterator.remove();
+        }
+      }
+
+      if (!runsToBeStopped.isEmpty()) {
+        // Fetch the latest active runs again, since it's also possible that the program run already stopped by itself
+        runsToBeStopped = new HashMap<>(activeRunsSupplier.get());
+        if (!runsToBeStopped.isEmpty()) {
+          TimeUnit.MILLISECONDS.sleep(200);
+        }
+      }
+    }
+
     return futures;
   }
 
