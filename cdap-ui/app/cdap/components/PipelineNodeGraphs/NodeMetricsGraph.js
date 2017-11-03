@@ -84,8 +84,6 @@ export default class NodeMetricsGraph extends Component {
           });
         });
     }
-
-    this.onLegendClick = this.onLegendClick.bind(this);
   }
 
   onLegendClick = (itemTitle) => {
