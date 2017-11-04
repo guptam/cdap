@@ -184,9 +184,6 @@ public class ProgramLifecycleHttpHandler extends AbstractAppFabricHttpHandler {
     .registerTypeAdapter(Constraint.class, new ConstraintCodec())
     .create();
 
-//  private static final Function<RunRecordMeta, RunRecord> CONVERT_TO_RUN_RECORD =
-//    input -> new RunRecord(input);
-
   private final ProgramLifecycleService lifecycleService;
   private final DiscoveryServiceClient discoveryServiceClient;
   private final QueueAdmin queueAdmin;

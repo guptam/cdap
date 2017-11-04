@@ -364,18 +364,32 @@ public class ProgramLifecycleService extends AbstractIdleService {
    * @throws UnauthorizedException if the user issuing the command is not authorized to stop the program. To stop a
    *                               program, a user requires {@link Action#EXECUTE} permission on the program.
    */
-  public List<ListenableFuture<ProgramController>> issueStop(ProgramId programId, @Nullable String runId)
-    throws Exception {
+  public List<ListenableFuture<ProgramController>> issueStop(ProgramId programId,
+                                                             @Nullable String runId) throws Exception {
+    ProgramRunId programRunId = null;
+    if (runId != null) {
+      try {
+        // Validate the runid and create the ProgramRunId
+        programRunId = programId.run(RunIds.fromString(runId));
+      } catch (IllegalArgumentException e) {
+        throw new BadRequestException(e);
+      }
+    }
+
     authorizationEnforcer.enforce(programId, authenticationContext.getPrincipal(), Action.EXECUTE);
 
+    ProgramRunId finalProgramRunId = programRunId;
     Supplier<Map<ProgramRunId, RunRecordMeta>> activeRunsSupplier = () -> {
       if (runId == null) {
         return store.getActiveRuns(programId);
       } else {
         RunRecordMeta runRecord = store.getRun(programId, runId);
-        return runRecord == null
+        EnumSet<ProgramRunStatus> activeStates = EnumSet.of(ProgramRunStatus.STARTING,
+                                                            ProgramRunStatus.RUNNING,
+                                                            ProgramRunStatus.SUSPENDED);
+        return runRecord == null || !activeStates.contains(runRecord.getStatus())
           ? Collections.emptyMap()
-          : Collections.singletonMap(programId.run(runId), runRecord);
+          : Collections.singletonMap(finalProgramRunId, runRecord);
       }
     };
 
@@ -387,12 +401,11 @@ public class ProgramLifecycleService extends AbstractIdleService {
       } else if (!store.programExists(programId)) {
         throw new ProgramNotFoundException(programId);
       }
-      throw new BadRequestException(String.format("Program '%s' is not running.", programId));
+      throw new NotFoundException(String.format("Program '%s' is not running.", programId));
     }
 
     // Check if the program is running and is started by Workflow
     if (runId != null) {
-      ProgramRunId programRunId = programId.run(runId);
       RunRecordMeta runRecord = activeRuns.get(programRunId);
       if (runRecord != null && runRecord.getProperties().containsKey("workflowrunid")
         && runRecord.getStatus().equals(ProgramRunStatus.RUNNING)) {

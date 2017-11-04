@@ -423,7 +423,7 @@ public class ProgramLifecycleHttpHandlerTest extends AppFabricTestBase {
     // stop program in unknown namespace
     stopProgram(Id.Program.from("noexist", WORDCOUNT_APP_NAME, ProgramType.FLOW, WORDCOUNT_FLOW_NAME), 404);
     // stop program that is not running
-    stopProgram(Id.Program.from(TEST_NAMESPACE1, WORDCOUNT_APP_NAME, ProgramType.FLOW, WORDCOUNT_FLOW_NAME), 400);
+    stopProgram(Id.Program.from(TEST_NAMESPACE1, WORDCOUNT_APP_NAME, ProgramType.FLOW, WORDCOUNT_FLOW_NAME), 404);
     // stop run of a program with ill-formed run id
     stopProgram(Id.Program.from(TEST_NAMESPACE1, WORDCOUNT_APP_NAME, ProgramType.FLOW, WORDCOUNT_FLOW_NAME),
                 "norunid", 400);
