@@ -116,7 +116,7 @@ export default class NodeMetricsGraphLegends extends Component {
   }
 
   renderPortsMetricsLegendsPopover() {
-    let checkedItemsWithoutErrorRecords = this.props.checkedItems.filter((item) => item.title !== recordsErrorTitle);
+    let checkedItemsWithoutErrorRecords = this.props.checkedItems.filter((item) => item !== recordsErrorTitle);
 
     return (
       <div className='ports-legend-popover-with-errors'>
@@ -135,15 +135,7 @@ export default class NodeMetricsGraphLegends extends Component {
               :
                 (
                   <div className='rv-discrete-color-legend horizontal'>
-                    <div className="rv-discrete-color-legend-item horizontal">
-                      <span
-                        className="rv-discrete-color-legend-item__color"
-                        style={{background: this.props.items[1].color}}
-                      />
-                      <span className="rv-discrete-color-legend-item__title">
-                        {this.props.items[1].title}
-                      </span>
-                    </div>
+                    <NodeMetricsGraphLegend item={this.itemsWithoutErrorRecords[0]} />
                   </div>
                 )
             }
